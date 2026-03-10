@@ -8,7 +8,9 @@ public class SwiftyMockyTestObserver: NSObject, XCTestObservation {
     private static var currentTestCase: XCTestCase?
     /// [Internal] Setup observing once
     private static let setupBlock: (() -> Void) = {
-        Matcher.fatalErrorHandler = SwiftyMockyTestObserver.handleFatalError
+        Matcher.fatalErrorHandler = { message, file, line in
+            SwiftyMockyTestObserver.handleFatalError(message: message, file: file, line: line)
+        }
         let addObserver = { XCTestObservationCenter.shared.addTestObserver(SwiftyMockyTestObserver()) }
         if Thread.isMainThread {
             addObserver()

@@ -1,9 +1,11 @@
 import Foundation
 
 /// Matcher is container class, responsible for storing and resolving comparators for given types.
-public class Matcher {
+public class Matcher: @unchecked Sendable {
     /// Shared **Matcher** instance
-    public static var `default` = Matcher()
+    public static let `default` = Matcher()
+    /// [Internal] Lock protecting mutable state
+    private let lock = NSLock()
     /// [Internal] Matchers storage
     private var matchers: [(Mirror,Any)] = []
     /// [Internal] file where comparison faiure should be recorded
@@ -11,7 +13,20 @@ public class Matcher {
     /// [Internal] line where comparison faiure should be recorded
     private var line: UInt?
     /// [Internal] matcher fatal error handler
-    public static var fatalErrorHandler: (String, StaticString, UInt) -> Void = { _,_,_ in}
+    private static let fatalErrorHandlerLock = NSLock()
+    private static var _fatalErrorHandler: @Sendable (String, StaticString, UInt) -> Void = { _,_,_ in}
+    public static var fatalErrorHandler: @Sendable (String, StaticString, UInt) -> Void {
+        get {
+            fatalErrorHandlerLock.lock()
+            defer { fatalErrorHandlerLock.unlock() }
+            return _fatalErrorHandler
+        }
+        set {
+            fatalErrorHandlerLock.lock()
+            defer { fatalErrorHandlerLock.unlock() }
+            _fatalErrorHandler = newValue
+        }
+    }
 
     /// Create new clean matcher instance.
     public init() {
@@ -25,7 +40,9 @@ public class Matcher {
     ///
     /// - Parameter matcher: other matcher instance
     public init(matcher: Matcher) {
+        matcher.lock.lock()
         self.matchers = matcher.matchers
+        matcher.lock.unlock()
     }
 
     /// Registers array comparators for all basic types, their optional versions
@@ -193,6 +210,8 @@ public class Matcher {
     }
 
     public func set(file: StaticString?, line: UInt?) {
+        lock.lock()
+        defer { lock.unlock() }
         self.file = file
         self.line = line
     }
@@ -206,7 +225,11 @@ public class Matcher {
     }
 
     public func onFatalFailure(_ message: String) {
-        guard let file = self.file, let line = self.line else { return }
+        lock.lock()
+        let capturedFile = self.file
+        let capturedLine = self.line
+        lock.unlock()
+        guard let file = capturedFile, let line = capturedLine else { return }
         Matcher.fatalErrorHandler(message, file, line)
     }
 
@@ -222,6 +245,8 @@ public class Matcher {
     ///   - match: comparator closure
     public func register<T>(_ valueType: T.Type, match: @escaping (T,T) -> Bool) {
         let mirror = Mirror(reflecting: valueType)
+        lock.lock()
+        defer { lock.unlock() }
         matchers.append((mirror, match as Any))
     }
 
@@ -237,7 +262,10 @@ public class Matcher {
     /// - Parameter valueType: Equatable type
     public func register<T>(_ valueType: T.Type) where T: Equatable {
         let mirror = Mirror(reflecting: valueType)
-        matchers.append((mirror, comparator(for: T.self) as Any))
+        let comp: (T, T) -> Bool = { $0 == $1 }
+        lock.lock()
+        defer { lock.unlock() }
+        matchers.append((mirror, comp as Any))
     }
 
     /// Returns comparator closure for given type (if any).
@@ -250,6 +278,13 @@ public class Matcher {
     /// - Parameter valueType: compared type
     /// - Returns: comparator closure
     public func comparator<T>(for valueType: T.Type) -> ((T,T) -> Bool)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return comparator_unlocked(for: valueType)
+    }
+
+    /// [Internal] Unlocked version for use within already-locked contexts.
+    private func comparator_unlocked<T>(for valueType: T.Type) -> ((T,T) -> Bool)? {
         let mirror = Mirror(reflecting: valueType)
         let comparator = matchers.reversed().first { (current, _) -> Bool in
             return current.subjectType == mirror.subjectType
@@ -265,12 +300,14 @@ public class Matcher {
     /// - Parameter valueType: Sequence type
     /// - Returns: comparator closure
     public func comparator<T>(for valueType: T.Type) -> ((T,T) -> Bool)? where T: Sequence {
+        lock.lock()
         let mirror = Mirror(reflecting: valueType)
-        let comparator = matchers.reversed().first { (current, _) -> Bool in
+        let foundComparator = matchers.reversed().first { (current, _) -> Bool in
             return current.subjectType == mirror.subjectType
         }?.1
+        lock.unlock()
 
-        if let compare = comparator as? (T,T) -> Bool {
+        if let compare = foundComparator as? (T,T) -> Bool {
             return compare
         } else if let compare = self.comparator(for: T.Element.self) {
             return { (l: T, r: T) -> Bool in
